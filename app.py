@@ -1,66 +1,52 @@
+from flask import Flask, request, render_template
 import pandas as pd
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.model_selection import train_test_split
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import json
-import os
+import re
 
 app = Flask(__name__)
 
-CORS(app)
+# Load training data
+df = pd.read_csv('training.csv')
+X = df.drop(['Disease', 'Medication'], axis=1)
+y = df['Disease']
+med_map = df[['Disease', 'Medication']].drop_duplicates().set_index('Disease')['Medication'].to_dict()
 
-try:
-    df = pd.read_csv('training.csv')
+# Train model
+clf = DecisionTreeClassifier()
+clf.fit(X, y)
 
-    diseases = df['prognosis']
-    medications = df['medicine']
+# List of known symptoms from dataset
+known_symptoms = X.columns.tolist()
 
-    symptom_columns = df.columns[:-2].tolist()
-    X = df[symptom_columns]
-    y = diseases
+def extract_symptoms(text):
+    text = text.lower()
+    detected = []
+    for symptom in known_symptoms:
+        if re.search(r'\b' + re.escape(symptom.lower()) + r'\b', text):
+            detected.append(symptom)
+    return detected
 
-    model = DecisionTreeClassifier()
-    model.fit(X, y)
+@app.route('/')
+def home():
+    return render_template('index.html')
 
-    disease_med_map = df.set_index('prognosis')['medicine'].to_dict()
+@app.route('/predict', methods=['POST'])
+def predict():
+    user_input = request.form['user_input']
+    symptoms = extract_symptoms(user_input)
 
-    print("Model trained and data loaded successfully!")
+    if not symptoms:
+        return render_template('index.html', prediction="No recognizable symptoms found.", symptoms="", medication="")
 
-except FileNotFoundError:
-    print("Error: training.csv not found. Make sure it's in the same directory as app.py and your Render build process copies it.")
-    exit()
+    # Build input vector
+    input_vector = [1 if s in symptoms else 0 for s in known_symptoms]
+    prediction = clf.predict([input_vector])[0]
+    medication = med_map.get(prediction, "No suggestion available")
 
-except Exception as e:
-    print(f"An error occurred during data loading or model training: {e}")
-    exit()
-
-@app.route('/predict_disease', methods=['POST'])
-def predict_disease():
-    data = request.json
-    user_symptoms = data.get('symptoms', [])
-
-    if not user_symptoms:
-        return jsonify({'error': 'No symptoms provided.'}), 400
-
-    input_symptom_vector = pd.DataFrame(0, index=[0], columns=symptom_columns)
-
-    for symptom in user_symptoms:
-        normalized_symptom = symptom.strip().replace(' ', '_').lower()
-        if normalized_symptom in input_symptom_vector.columns:
-            input_symptom_vector[normalized_symptom] = 1
-        else:
-            print(f"Warning: Symptom '{symptom}' (normalized: '{normalized_symptom}') not found in training data. Ignoring.")
-
-    predicted_disease = model.predict(input_symptom_vector)[0]
-
-    predicted_medication = disease_med_map.get(predicted_disease, "No specific medication found for this disease.")
-
-    return jsonify({
-        'disease': predicted_disease,
-        'medication': predicted_medication
-    })
+    return render_template('index.html',
+                           prediction=prediction,
+                           symptoms=", ".join(symptoms),
+                           medication=medication)
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=True)
